@@ -1,35 +1,70 @@
-# This workflow will build a Java project with Maven, and cache/restore any dependencies to improve the workflow execution time
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-java-with-maven
-
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
-
-name: Java CI with Maven
+name: CI Fuzz
+# Set an action secret called "CI_FUZZ_API_TOKEN" with an API token
+# generated in CI Fuzz web interface.
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ master ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ master ]
+
+env:
+  # The fuzzing server gRPC URL.
+  FUZZING_SERVER_ADDRESS: grpc.code-intelligence.com:443
+  # The fuzzing server HTTP URL.
+  WEB_APP_ADDRESS: https://app.code-intelligence.com
+  # Directory in which the repository will be cloned.
+  CHECKOUT_DIR: checkout-dir/
 
 jobs:
-  build:
-
+  fuzz_tests:
     runs-on: ubuntu-latest
-
+    # Configure your build environment here
+    # container: example/docker_image
     steps:
-    - uses: actions/checkout@v3
-    - name: Set up JDK 11
-      uses: actions/setup-java@v3
-      with:
-        java-version: '11'
-        distribution: 'temurin'
-        cache: maven
-    - name: Build with Maven
-      run: mvn -B package --file pom.xml
-
-    # Optional: Uploads the full dependency graph to GitHub to improve the quality of Dependabot alerts this repository can receive
-    - name: Update dependency graph
-      uses: advanced-security/maven-dependency-submission-action@571e99aab1055c2e71a1e2309b9691de18d6b7d6
+      - id: checkout
+        name: Checkout Repository
+        uses: actions/checkout@v2
+        with:
+          path: ${{ env.CHECKOUT_DIR }}
+      - id: install-build-tools
+        name: Install Fuzzer Build Tools
+        uses: CodeIntelligenceTesting/github-actions/install-fuzzer-builder@v4
+      - id: build-fuzzers
+        name: Build Fuzzers
+        run: ci-fuzz/bin/ci-build fuzzers --directory $GITHUB_WORKSPACE/$CHECKOUT_DIR/ --git_commit_sha $GITHUB_SHA --git_branch $GITHUB_REF_NAME
+        shell: "bash"
+      - id: start-fuzzing
+        name: Start Fuzzing
+        uses: CodeIntelligenceTesting/github-actions/start-fuzzing@v4
+        with:
+          ci_fuzz_api_token: ${{ secrets.CI_FUZZ_API_TOKEN }}
+          fuzzing_server_address: ${{ env.FUZZING_SERVER_ADDRESS }}
+          fuzzing_artifact: ${{ env.CHECKOUT_DIR }}/fuzzing-artifacts.tar.gz
+          checkout_directory: ${{ env.CHECKOUT_DIR }}
+      - id: monitor-fuzzing
+        name: Fuzzing
+        uses: CodeIntelligenceTesting/github-actions/monitor-fuzzing@v4
+        with:
+          ci_fuzz_api_token: ${{ secrets.CI_FUZZ_API_TOKEN }}
+          test_collection_run: ${{ steps.start-fuzzing.outputs.test_collection_run }}
+          fuzzing_server_address: ${{ env.FUZZING_SERVER_ADDRESS }}
+          dashboard_address: ${{ env.WEB_APP_ADDRESS }}
+      - id: save-results
+        name: Save Fuzz Test Results
+        uses: CodeIntelligenceTesting/github-actions/save-results@v4
+        if: ${{ success() || failure() }}
+        with:
+          ci_fuzz_api_token: ${{ secrets.CI_FUZZ_API_TOKEN }}
+          test_collection_run: ${{ steps.start-fuzzing.outputs.test_collection_run }}
+          fuzzing_server_address: ${{ env.FUZZING_SERVER_ADDRESS }}
+          dashboard_address: ${{ env.WEB_APP_ADDRESS }}
+      - id: upload-artifact
+        uses: actions/upload-artifact@v2
+        if: ${{ (success() || failure()) }}
+        with:
+          name: ci_fuzz_results
+          path: |
+            findings.json
+            coverage.json
+            web_app_address.txt
